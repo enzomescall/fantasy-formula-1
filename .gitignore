@@ -4,6 +4,10 @@
 # Local state & artifacts
 state/
 
+# Markdown docs (keep only README)
+*.md
+!README.md
+
 # Python
 __pycache__/
 *.pyc

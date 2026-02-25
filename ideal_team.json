@@ -1,15 +1,14 @@
 {
-  "team_name": "Pascal GP 1",
-  "drivers": [
-    "Charles Leclerc",
-    "Valtteri Bottas",
-    "Liam Lawson",
-    "Gabriel Bortoleto",
-    "Franco Colapinto"
-  ],
+  "boost_driver": "Charles Leclerc",
   "constructors": [
-    "McLaren",
-    "Ferrari"
+    "Ferrari",
+    "McLaren"
   ],
-  "boost_driver": "Gabriel Bortoleto"
+  "drivers": [
+    "Gabriel Bortoleto",
+    "Valtteri Bottas",
+    "Franco Colapinto",
+    "Liam Lawson",
+    "Charles Leclerc"
+  ]
 }
