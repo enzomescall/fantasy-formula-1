@@ -1,29 +1,11 @@
-#!/usr/bin/env python3
-"""Compute optimal F1 Fantasy team under a max budget using data embedded in f1fantasytools.com/team-calculator.
+from __future__ import annotations
 
-Outputs JSON:
-{
-  "max_budget": 100.0,
-  "constructors": ["MCL","FER"],
-  "drivers": ["LEC","BOT","LAW","BOR","COL"],
-  "boost": "LEC",
-  "total_cost": 100.0,
-  "expected_points": 168.0
-}
-
-Notes
-- Uses the first analyst simulation preset embedded in the page (currently Rhter Sim).
-- Team rules assumed: 2 constructors + 5 drivers, with exactly 1 boosted (2x) driver.
-"""
-
-import argparse
 import itertools
 import json
 import re
-import sys
-from typing import Dict, List, Tuple
-
 import urllib.request
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
 
 URL = "https://f1fantasytools.com/team-calculator"
 
@@ -39,15 +21,12 @@ def fetch(url: str) -> str:
         return r.read().decode("utf-8", errors="ignore")
 
 
-def _extract_next_payload(html: str) -> str:
+def extract_next_payload(html: str) -> str:
     """Extract and decode the largest self.__next_f.push([1,"..."]) string."""
-    # There can be multiple pushes; we take the longest chunk as it usually contains the big JSON blob.
     chunks = re.findall(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)', html, flags=re.DOTALL)
     if not chunks:
         raise RuntimeError("Could not find self.__next_f.push payload in HTML")
     raw = max(chunks, key=len)
-    # raw is a JS string with backslash escapes (e.g. \" for quotes).
-    # Decode using unicode_escape; this is usually sufficient for Next/React flight payloads.
     try:
         decoded = raw.encode("utf-8").decode("unicode_escape")
     except Exception as e:
@@ -55,7 +34,7 @@ def _extract_next_payload(html: str) -> str:
     return decoded
 
 
-def _extract_json_object_from_payload(payload: str) -> dict:
+def extract_json_object_from_payload(payload: str) -> dict:
     """Payload looks like: '5:["$","$L..",null,{...}]'. Extract the {...}."""
     start = payload.find("{")
     if start == -1:
@@ -75,13 +54,11 @@ def _extract_json_object_from_payload(payload: str) -> dict:
     raise RuntimeError("Unbalanced braces while extracting JSON object")
 
 
-class Pick(object):
-    __slots__ = ("code", "price", "pts")
-
-    def __init__(self, code, price, pts):
-        self.code = code
-        self.price = float(price)
-        self.pts = float(pts)
+@dataclass(frozen=True)
+class Pick:
+    code: str
+    price: float
+    pts: float
 
 
 def compute_optimal(max_budget: float, data: dict) -> dict:
@@ -92,14 +69,10 @@ def compute_optimal(max_budget: float, data: dict) -> dict:
         raise RuntimeError("No analystSims found in embedded data")
 
     sim = analyst_sims[0]
-    # Points maps
-    # - constructors pts keyed by abbreviation (e.g. "MCL")
-    # - drivers pts keyed by driver id (e.g. "MER_RUS")
     drv_pts: Dict[str, float] = (sim.get("drivers") or {}).get("pts") or {}
     con_pts: Dict[str, float] = (sim.get("constructors") or {}).get("pts") or {}
 
-    # Master maps
-    drv_meta: Dict[str, Tuple[str, float]] = {}  # id -> (abbr, price)
+    drv_meta: Dict[str, Tuple[str, float]] = {}
     for d in drivers_raw:
         if d.get("type") == "driver" and d.get("id") and d.get("abbreviation"):
             drv_meta[str(d["id"])] = (str(d["abbreviation"]), float(d["price"]))
@@ -109,21 +82,20 @@ def compute_optimal(max_budget: float, data: dict) -> dict:
         if c.get("type") == "constructor" and c.get("abbreviation"):
             con_price[str(c["abbreviation"])] = float(c["price"])
 
-    # Build pick lists.
-    # For drivers, we use abbreviation as the pick code, but iterate using sim driver ids.
     drivers: List[Pick] = []
     for drv_id, pts in drv_pts.items():
         if drv_id in drv_meta:
             abbr, price = drv_meta[drv_id]
             drivers.append(Pick(code=abbr, price=price, pts=float(pts)))
 
-    constructors: List[Pick] = [Pick(code=k, price=con_price[k], pts=float(v)) for k, v in con_pts.items() if k in con_price]
+    constructors: List[Pick] = [
+        Pick(code=k, price=con_price[k], pts=float(v)) for k, v in con_pts.items() if k in con_price
+    ]
 
     if not drivers or not constructors:
         raise RuntimeError("Could not build drivers/constructors pick lists")
 
     best: Tuple[float, float, Tuple[str, str], Tuple[str, ...], str] | None = None
-    # best = (points, cost, (C1,C2), (D1..D5), boost)
 
     for c1, c2 in itertools.combinations(constructors, 2):
         c_cost = c1.price + c2.price
@@ -131,7 +103,6 @@ def compute_optimal(max_budget: float, data: dict) -> dict:
         if c_cost >= max_budget:
             continue
 
-        # Choose 5 drivers
         for ds in itertools.combinations(drivers, 5):
             d_cost = sum(d.price for d in ds)
             total_cost = c_cost + d_cost
@@ -139,10 +110,11 @@ def compute_optimal(max_budget: float, data: dict) -> dict:
                 continue
 
             base_points = c_points + sum(d.pts for d in ds)
-            # Choose boost driver among the 5
             for boost in ds:
                 points = base_points + boost.pts
-                if best is None or points > best[0] + 1e-9 or (abs(points - best[0]) < 1e-9 and total_cost < best[1] - 1e-9):
+                if best is None or points > best[0] + 1e-9 or (
+                    abs(points - best[0]) < 1e-9 and total_cost < best[1] - 1e-9
+                ):
                     best = (
                         points,
                         total_cost,
@@ -171,20 +143,28 @@ def compute_optimal(max_budget: float, data: dict) -> dict:
     }
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--budget", type=float, default=100.0, help="Maximum budget (e.g., 100)")
-    ap.add_argument("--url", default=URL)
-    args = ap.parse_args()
+def load_optimal_and_prices(max_budget: float, url: str | None = None) -> tuple[dict, dict]:
+    """Return (optimal, price_maps).
 
-    html = fetch(args.url)
-    payload = _extract_next_payload(html)
-    data = _extract_json_object_from_payload(payload)
+    price_maps:
+      {
+        "drivers": {"LEC": 22.8, ...},
+        "constructors": {"MCL": 28.9, ...}
+      }
+    """
+    html = fetch(url or URL)
+    payload = extract_next_payload(html)
+    data = extract_json_object_from_payload(payload)
 
-    out = compute_optimal(args.budget, data)
-    print(json.dumps(out, indent=2, sort_keys=True))
-    return 0
+    drv_prices: dict[str, float] = {}
+    for d in (data.get("drivers") or []):
+        if d.get("type") == "driver" and d.get("abbreviation") and d.get("price") is not None:
+            drv_prices[str(d["abbreviation"])] = float(d["price"])
 
+    con_prices: dict[str, float] = {}
+    for c in (data.get("constructors") or []):
+        if c.get("type") == "constructor" and c.get("abbreviation") and c.get("price") is not None:
+            con_prices[str(c["abbreviation"])] = float(c["price"])
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+    optimal = compute_optimal(max_budget, data)
+    return optimal, {"drivers": drv_prices, "constructors": con_prices}
