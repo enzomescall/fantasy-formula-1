@@ -144,6 +144,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_opt.add_argument("--url", default=None, help="Override f1fantasytools team-calculator URL")
     p_opt.add_argument("--ideal-out", default=str(config.BASE_DIR / "ideal_team.json"))
     p_opt.add_argument("--boost-driver-override", default=None)
+    # Convenience flag (matches older workflow). Currently state JSONs are written by default.
+    p_opt.add_argument("--write-state", action="store_true", help="(No-op) Kept for compatibility; state files are written by default")
     p_opt.set_defaults(func=cmd_optimal)
 
     p_sync = sub.add_parser("sync", help="Sync official team to an ideal JSON spec")
