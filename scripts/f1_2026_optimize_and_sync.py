@@ -62,7 +62,15 @@ CONSTRUCTOR_ABBR_TO_FULL = {
 }
 
 
-def _load_optimizer_json(budget: float, url: str | None) -> dict:
+def _load_optimizer_json(budget: float, url: str | None) -> tuple[dict, dict]:
+    """Return (optimal, price_maps).
+
+    price_maps:
+      {
+        "drivers": {"LEC": 22.8, ...},
+        "constructors": {"MCL": 28.9, ...}
+      }
+    """
     # Import optimizer logic directly (avoids parsing CLI output)
     sys.path.insert(0, str(BASE_DIR / "scripts"))
     import f1fantasytools_optimal_team as opt  # type: ignore
@@ -70,7 +78,20 @@ def _load_optimizer_json(budget: float, url: str | None) -> dict:
     html = opt.fetch(url or opt.URL)
     payload = opt._extract_next_payload(html)
     data = opt._extract_json_object_from_payload(payload)
-    return opt.compute_optimal(budget, data)
+
+    # Build price maps from embedded data
+    drv_prices: dict[str, float] = {}
+    for d in (data.get("drivers") or []):
+        if d.get("type") == "driver" and d.get("abbreviation") and d.get("price") is not None:
+            drv_prices[str(d["abbreviation"])]=float(d["price"])
+
+    con_prices: dict[str, float] = {}
+    for c in (data.get("constructors") or []):
+        if c.get("type") == "constructor" and c.get("abbreviation") and c.get("price") is not None:
+            con_prices[str(c["abbreviation"])]=float(c["price"])
+
+    optimal = opt.compute_optimal(budget, data)
+    return optimal, {"drivers": drv_prices, "constructors": con_prices}
 
 
 def _map_team(optimal: dict) -> dict:
@@ -210,7 +231,7 @@ def main() -> int:
         budget_meta = _scrape_site_budget(args.team_id, args.profile_dir, args.headful)
         budget = float(budget_meta["cap_m"])
 
-    optimal = _load_optimizer_json(budget, args.url)
+    optimal, price_maps = _load_optimizer_json(budget, args.url)
     mapped = _map_team(optimal)
 
     if args.boost_driver_override:
@@ -239,6 +260,54 @@ def main() -> int:
 
     (state_dir / "last_optimal.json").write_text(
         json.dumps(mapped["optimizer"], indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    # Combine last budget + optimal + item prices side-by-side
+    opt_dr = list(mapped["optimizer"].get("drivers") or [])
+    opt_con = list(mapped["optimizer"].get("constructors") or [])
+    boost = mapped["optimizer"].get("boost")
+
+    drivers_with_prices = [
+        {
+            "abbr": abbr,
+            "name": DRIVER_ABBR_TO_FULL.get(abbr),
+            "price_m": price_maps.get("drivers", {}).get(abbr),
+            "boosted": (abbr == boost),
+        }
+        for abbr in opt_dr
+    ]
+    constructors_with_prices = [
+        {
+            "abbr": abbr,
+            "name": CONSTRUCTOR_ABBR_TO_FULL.get(abbr),
+            "price_m": price_maps.get("constructors", {}).get(abbr),
+        }
+        for abbr in opt_con
+    ]
+
+    total_m = 0.0
+    missing = []
+    for row in drivers_with_prices + constructors_with_prices:
+        pm = row.get("price_m")
+        if pm is None:
+            missing.append(row.get("abbr"))
+            continue
+        total_m += float(pm)
+
+    combined = {
+        "ts_utc": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "budget": budget_meta or {"cap_m": budget},
+        "optimal": mapped["optimizer"],
+        "drivers": drivers_with_prices,
+        "constructors": constructors_with_prices,
+        "total_m": round(total_m, 3),
+        "remaining_m": (budget_meta or {}).get("remaining_m"),
+        "used_m": (budget_meta or {}).get("used_m"),
+        "cap_m": (budget_meta or {}).get("cap_m", budget),
+        "missing_price_abbr": missing,
+    }
+    (state_dir / "last_optimal_with_budget.json").write_text(
+        json.dumps(combined, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
     cmd = [
