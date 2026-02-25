@@ -1,0 +1,15 @@
+{
+  "team_name": "Pascal GP 1",
+  "drivers": [
+    "Charles Leclerc",
+    "Valtteri Bottas",
+    "Liam Lawson",
+    "Gabriel Bortoleto",
+    "Franco Colapinto"
+  ],
+  "constructors": [
+    "McLaren",
+    "Ferrari"
+  ],
+  "boost_driver": "Gabriel Bortoleto"
+}

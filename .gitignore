@@ -1,0 +1,13 @@
+# Secrets / sessions
+.playwright-profile/
+
+# Local state & artifacts
+state/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS/editor
+.DS_Store
