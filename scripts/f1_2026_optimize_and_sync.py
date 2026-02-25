@@ -103,9 +103,93 @@ def _map_team(optimal: dict) -> dict:
     }
 
 
+def _parse_money_millions(text: str) -> float | None:
+    # Accept patterns like "$14.8M" or "14.8 million"
+    if not text:
+        return None
+    import re
+
+    m = re.search(r"\$\s*([0-9]+(?:\.[0-9]+)?)\s*M", text, flags=re.I)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*million", text, flags=re.I)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+def _scrape_site_budget(team_id: int, profile_dir: str, headful: bool) -> dict:
+    """Scrape remaining budget and infer total cap from the official F1 Fantasy team page.
+
+    We infer total cap as:
+      cap ≈ remaining + sum(selected driver/constructor prices)
+
+    This is robust even if the site changes wording, as long as selected cards show prices.
+    """
+    from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
+
+    url = f"https://fantasy.formula1.com/en/my-team/{team_id}"
+    with sync_playwright() as p:
+        ctx = p.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
+            headless=(not headful),
+            viewport={"width": 900, "height": 1600},
+        )
+        page = ctx.new_page()
+        page.goto(url, wait_until="domcontentloaded")
+        try:
+            page.wait_for_selector('text=Cost Cap', timeout=60000)
+        except PwTimeout:
+            # fall back: likely logged out
+            raise RuntimeError(f"Could not load team page / budget widget. Are we logged in? URL={page.url}")
+
+        # Remaining budget is shown as "Cost Cap: $X.XM" in the budget widget.
+        remaining = None
+        try:
+            # This matches the <em>$8.8M</em> next to the Cost Cap label.
+            txt = page.locator("text=Cost Cap").first.locator("xpath=ancestor::section[1]").inner_text()
+            remaining = _parse_money_millions(txt)
+        except Exception:
+            remaining = None
+
+        if remaining is None:
+            # Fallback: parse from HTML around the label
+            html = page.content()
+            import re
+
+            m = re.search(r"Cost\s*Cap:\s*</span><em>\$\s*([0-9]+(?:\.[0-9]+)?)\s*M", html, flags=re.I)
+            if m:
+                remaining = float(m.group(1))
+
+        # Selected prices: sum prices visible in selected container ($x.xM)
+        selected_sum = page.evaluate(
+            r"""() => {
+              const cont = document.querySelector('div.si-formation__container') || document.body;
+              const txt = cont.innerText || '';
+              const matches = [...txt.matchAll(/\$\s*([0-9]+(?:\.[0-9]+)?)\s*M/gi)];
+              const nums = matches.map(m => parseFloat(m[1])).filter(n => Number.isFinite(n));
+              return nums;
+            }"""
+        )
+        used = float(sum(selected_sum or []))
+
+        if remaining is None:
+            raise RuntimeError("Could not parse remaining Cost Cap from page")
+
+        cap = remaining + used
+        ctx.close()
+
+    return {
+        "remaining_m": round(remaining, 3),
+        "used_m": round(used, 3),
+        "cap_m": round(cap, 3),
+        "source": "fantasy.formula1.com",
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--budget", type=float, default=100.0)
+    ap.add_argument("--budget", type=float, default=None, help="Override budget cap (millions). If omitted, scrape from official site")
     ap.add_argument("--team-id", type=int, default=1)
     ap.add_argument("--expected-team-name", default="Pascal GP 1")
     ap.add_argument("--ideal-out", default=str(BASE_DIR / "ideal_team.json"))
@@ -120,7 +204,13 @@ def main() -> int:
     ap.add_argument("--profile-dir", default=str(BASE_DIR / ".playwright-profile"))
     args = ap.parse_args()
 
-    optimal = _load_optimizer_json(args.budget, args.url)
+    budget = args.budget
+    budget_meta = None
+    if budget is None:
+        budget_meta = _scrape_site_budget(args.team_id, args.profile_dir, args.headful)
+        budget = float(budget_meta["cap_m"])
+
+    optimal = _load_optimizer_json(budget, args.url)
     mapped = _map_team(optimal)
 
     if args.boost_driver_override:
@@ -138,9 +228,15 @@ def main() -> int:
     out_path = Path(args.ideal_out)
     out_path.write_text(json.dumps(ideal, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    # Save full optimizer output (ignored by git if under state/)
+    # Save scrape + optimizer outputs (ignored by git if under state/)
     state_dir = BASE_DIR / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
+
+    if budget_meta:
+        (state_dir / "last_budget.json").write_text(
+            json.dumps(budget_meta, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
     (state_dir / "last_optimal.json").write_text(
         json.dumps(mapped["optimizer"], indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
