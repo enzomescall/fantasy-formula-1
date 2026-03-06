@@ -36,6 +36,8 @@ def compute_diff(current_state: dict, ideal: dict) -> dict:
 
     noop = cur_dr_set == ideal_dr_set and cur_con_set == ideal_con_set and (not boost_change)
 
+    transfers_required = len(drivers_add) + len(constructors_add)
+
     return {
         "noop": noop,
         "drivers_remove": drivers_remove,
@@ -45,4 +47,5 @@ def compute_diff(current_state: dict, ideal: dict) -> dict:
         "boost_change": boost_change,
         "current_boost": cur_boost,
         "ideal_boost": ideal_boost,
+        "transfers_required": transfers_required,
     }
