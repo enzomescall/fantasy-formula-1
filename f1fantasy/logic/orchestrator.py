@@ -8,7 +8,7 @@ from playwright.sync_api import sync_playwright
 
 from .. import config
 from ..data_sources.f1fantasytools import load_optimal_and_prices
-from ..data_sources.official_site import scrape_budget_snapshot
+from ..data_sources.official_site import scrape_budget_snapshot, scrape_transfer_status
 from ..io.artifacts import ensure_state_dirs, read_json, run_artifacts_dir, utcstamp, write_json, safe_filename
 from ..logic.diff import compute_diff, normalize_name, as_set
 from ..mappings import CONSTRUCTOR_ABBR_TO_FULL, DRIVER_ABBR_TO_FULL, map_optimal_to_ideal
@@ -189,12 +189,39 @@ def run_end_to_end(
     }
     write_json(config.STATE_DIR / "last_optimal_with_budget.json", combined)
 
-    site_before = None
+    # Always fetch the current site state + diff first so we can make a transfer policy decision.
+    pre = sync_team_to_ideal(
+        team_id=team_id,
+        ideal=ideal,
+        expected_team_name=expected_team_name,
+        profile_dir=profile_dir,
+        headful=headful,
+        apply=False,
+        force=True,
+    )
+    site_before = pre.get("site_before")
+    diff = pre.get("diff")
+
+    transfer_status = scrape_transfer_status(team_id=team_id, profile_dir=profile_dir, headful=headful)
+
+    transfers_required = int(diff.get("transfers_required") or 0)
+    free_transfers = int(transfer_status.free_transfers)
+    apply_allowed = transfers_required <= free_transfers
+    policy_decision = {
+        "apply": bool(apply_allowed),
+        "reason": (
+            "Within free transfers"
+            if apply_allowed
+            else f"Would require {transfers_required} transfers; only {free_transfers} free transfers available"
+        ),
+        "transfers_required": transfers_required,
+        "free_transfers": free_transfers,
+    }
+
     site_after = None
-    diff = None
     verify = {"ok": False}
 
-    if apply:
+    if apply and apply_allowed:
         res = sync_team_to_ideal(
             team_id=team_id,
             ideal=ideal,
@@ -211,19 +238,8 @@ def run_end_to_end(
         if site_after is not None:
             final_diff = compute_diff(site_after, ideal)
             verify = {"ok": bool(final_diff.get("noop")), "diff_final_vs_ideal": final_diff}
-
     else:
-        res = sync_team_to_ideal(
-            team_id=team_id,
-            ideal=ideal,
-            expected_team_name=expected_team_name,
-            profile_dir=profile_dir,
-            headful=headful,
-            apply=False,
-            force=True,
-        )
-        site_before = res.get("site_before")
-        diff = res.get("diff")
+        # Not applying (either --apply was not requested or policy blocked it).
         verify = {"ok": bool(diff.get("noop")), "diff_final_vs_ideal": diff}
 
     bundle = {
@@ -234,11 +250,14 @@ def run_end_to_end(
             "budget": budget_snapshot.to_dict() if budget_snapshot else {"cap_m": cap_m},
             "price_source": "f1fantasytools",
             "sim": optimal.get("sim"),
+            "apply_requested": bool(apply),
         },
         "optimal": combined,
         "ideal": ideal,
         "site_before": site_before,
+        "transfer_status": transfer_status.to_dict(),
         "diff": diff,
+        "policy_decision": policy_decision,
         "site_after": site_after,
         "verify": verify,
     }
