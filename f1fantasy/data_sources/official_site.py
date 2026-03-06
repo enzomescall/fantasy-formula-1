@@ -5,7 +5,8 @@ import re
 from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
 
 from .. import config
-from ..models import BudgetSnapshot
+from ..io.artifacts import utcstamp
+from ..models import BudgetSnapshot, TransferStatus
 from ..site.browser import launch_persistent_context
 
 
@@ -81,5 +82,61 @@ def scrape_budget_snapshot(*, team_id: int, profile_dir: str, headful: bool) -> 
         remaining_m=round(float(remaining), 3),
         used_m=round(float(used), 3),
         cap_m=round(float(cap), 3),
+        source="fantasy.formula1.com",
+    )
+
+
+def _parse_transfer_status_text(txt: str) -> tuple[int | None, int | None]:
+    if not txt:
+        return None, None
+
+    # Free transfers
+    m = re.search(r"\b(\d+)\s+free\s+transfers?\b", txt, flags=re.I)
+    free = int(m.group(1)) if m else None
+
+    # Penalty points per extra transfer (if shown)
+    # Common patterns: "10 pts" near "transfer" / "penalty" or "-10".
+    penalty = None
+    m = re.search(r"\b(?:penalty|transfer\s+penalty)[^0-9-]{0,20}(-?\d+)\s*(?:pts|points)?\b", txt, flags=re.I)
+    if m:
+        penalty = abs(int(m.group(1)))
+
+    return free, penalty
+
+
+def scrape_transfer_status(*, team_id: int, profile_dir: str, headful: bool) -> TransferStatus:
+    """Scrape current transfer limits from the official team page."""
+
+    url = config.FANTASY_TEAM_URL.format(team_id=team_id)
+    with sync_playwright() as p:
+        ctx = launch_persistent_context(playwright=p, profile_dir=profile_dir, headful=headful)
+        page = ctx.new_page()
+        page.goto(url, wait_until="domcontentloaded")
+
+        # Wait for core team-builder container to exist.
+        try:
+            page.wait_for_selector('div.si-cmo__container, text=Cost Cap', timeout=60000)
+        except PwTimeout:
+            ctx.close()
+            raise RuntimeError(f"Could not load team page. Are we logged in? URL={page.url}")
+
+        txt = page.evaluate(
+            r"""() => {
+              const root = document.querySelector('div.si-cmo__container') || document.body;
+              return root.innerText || '';
+            }"""
+        )
+        ctx.close()
+
+    free, penalty = _parse_transfer_status_text(txt)
+    if free is None:
+        raise RuntimeError("Could not find 'free transfers' on team page")
+
+    return TransferStatus(
+        ts_utc=utcstamp(),
+        team_id=team_id,
+        free_transfers=int(free),
+        penalty_points_per_extra=(int(penalty) if penalty is not None else None),
+        url=url,
         source="fantasy.formula1.com",
     )

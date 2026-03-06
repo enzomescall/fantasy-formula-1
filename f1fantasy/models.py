@@ -59,6 +59,19 @@ class BudgetSnapshot:
 
 
 @dataclass(frozen=True)
+class TransferStatus:
+    ts_utc: str
+    team_id: int
+    free_transfers: int
+    penalty_points_per_extra: int | None = None
+    url: str | None = None
+    source: str = "site"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class TeamState:
     ts_utc: str
     team_id: int
