@@ -37,6 +37,8 @@ CONSTRUCTOR_ABBR_TO_FULL: dict[str, str] = {
     "HAA": "Haas F1 Team",
     "AUD": "Audi",
     "RB": "Racing Bulls",
+    # Some data sources use the older/alternate abbreviation for Racing Bulls.
+    "VRB": "Racing Bulls",
     "CAD": "Cadillac",
 }
 

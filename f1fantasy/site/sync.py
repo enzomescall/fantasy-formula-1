@@ -173,10 +173,15 @@ class FantasySync:
 
     # ---------- interactions ----------
     def click_drivers_tab(self):
+        # Important: there are multiple "Drivers" links on the page (main site nav, footer).
+        # We specifically want the team-builder tab inside the player list header.
         self.page.evaluate(
             """() => {
-              const a = [...document.querySelectorAll('a')].find(x => (x.textContent||'').trim().toLowerCase()==='drivers');
-              if (a) { a.scrollIntoView({block:'center'}); a.click(); return true; }
+              const isTab = (el, name) => (el.textContent||'').trim().toLowerCase() === name;
+              const candidates = [...document.querySelectorAll('a,button,[role="tab"]')]
+                .filter(el => isTab(el, 'drivers') && el.closest('.si-cmo__playerList-head'));
+              const el = candidates[0];
+              if (el) { el.scrollIntoView({block:'center'}); el.click(); return true; }
               return false;
             }"""
         )
@@ -185,8 +190,11 @@ class FantasySync:
     def click_constructors_tab(self):
         self.page.evaluate(
             """() => {
-              const a = [...document.querySelectorAll('a')].find(x => (x.textContent||'').trim().toLowerCase()==='constructors');
-              if (a) { a.scrollIntoView({block:'center'}); a.click(); return true; }
+              const isTab = (el, name) => (el.textContent||'').trim().toLowerCase() === name;
+              const candidates = [...document.querySelectorAll('a,button,[role="tab"]')]
+                .filter(el => isTab(el, 'constructors') && el.closest('.si-cmo__playerList-head'));
+              const el = candidates[0];
+              if (el) { el.scrollIntoView({block:'center'}); el.click(); return true; }
               return false;
             }"""
         )
@@ -419,56 +427,66 @@ class FantasySync:
         self.page.wait_for_timeout(150)
 
     def set_boost(self, full_name: str):
+        """Set the 2x boost on a selected driver.
+
+        The site applies the boost when clicking "Add Boost". The optional trailing "Done" UI
+        is inconsistent in headless runs, so we don't rely on it.
+        """
         container = self.page.locator('div.si-formation__container').first
         img = container.locator(f'img[alt="{full_name}"]').first
         if img.count() == 0:
-            raise RuntimeError(
-                f"Boost target driver '{full_name}' not found in selected lineup container"
-            )
+            raise RuntimeError(f"Boost target driver '{full_name}' not found in selected lineup")
+
         img.scroll_into_view_if_needed()
-        (
-            img.locator("xpath=ancestor::button[1]").first
-            if img.locator("xpath=ancestor::button[1]").count()
-            else img
-        ).click()
-        self.page.wait_for_timeout(400)
+        (img.locator("xpath=ancestor::button[1]").first if img.locator("xpath=ancestor::button[1]").count() else img).click()
+        self.page.wait_for_timeout(250)
 
-        add_boost = self.page.locator('button:has-text("Add Boost")')
-        if add_boost.count() > 0:
-            add_boost.first.click()
-            self.page.wait_for_timeout(300)
+        add_boost = self.page.locator('button:has-text("Add Boost")').first
+        if add_boost.count() == 0:
+            raise RuntimeError("Add Boost button not found after opening driver card")
+        add_boost.click()
+        self.page.wait_for_timeout(250)
 
-        done = self.page.locator('button:has-text("Done")')
-        if done.count() > 0:
-            done.first.click()
-            self.page.wait_for_timeout(250)
+        self.page.keyboard.press("Escape")
+        self.page.wait_for_timeout(250)
 
     def persist_continue_confirm(self):
-        cont = self.page.locator('button:has-text("Continue")').first
-        if cont.count() == 0:
-            raise RuntimeError("Continue button not found")
-        if cont.is_disabled():
-            take_screenshot(self.page, self.run_dir / "continue_disabled.png")
-            raise RuntimeError("Continue button is disabled; team likely invalid or add/remove did not apply")
-        cont.click(force=True)
+        """Click Continue and confirm changes.
 
-        self.page.wait_for_timeout(500)
+        Playwright clicks can be intercepted by overlays/sticky nav. Use a direct DOM click on the
+        team-editor Continue button to avoid mis-clicking (e.g., navigating to Leagues).
+        """
+        self.page.wait_for_function(
+            """() => {
+              const root = document.querySelector('.si-cmo__container');
+              if (!root) return false;
+              const btn = [...root.querySelectorAll('button')].find(b => (b.textContent||'').trim() === 'Continue');
+              return !!btn && !btn.disabled;
+            }"""
+        )
+
+        clicked = self.page.evaluate(
+            """() => {
+              const root = document.querySelector('.si-cmo__container');
+              const btn = root ? [...root.querySelectorAll('button')].find(b => (b.textContent||'').trim() === 'Continue') : null;
+              if (!btn || btn.disabled) return false;
+              btn.scrollIntoView({block:'center'});
+              btn.click();
+              return true;
+            }"""
+        )
+        if not clicked:
+            raise RuntimeError("Failed to click Continue")
+
         try:
-            self.page.wait_for_selector('text=Team Changes', timeout=15000)
+            self.page.wait_for_selector('button:has-text("Confirm")', timeout=15000)
         except PwTimeout:
             take_screenshot(self.page, self.run_dir / "continue_no_modal.png")
-            raise
+            raise RuntimeError("Confirmation modal did not appear")
 
         take_screenshot(self.page, self.run_dir / "team_changes_modal.png")
-
-        confirm = self.page.locator('button:has-text("Confirm")').first
-        if confirm.count() == 0:
-            raise RuntimeError("Confirm Changes button not found in modal")
-        confirm.click()
-
+        self.page.locator('button:has-text("Confirm")').first.click(force=True)
         self.page.wait_for_timeout(1500)
-        self.page.goto(config.FANTASY_HOME_URL, wait_until="domcontentloaded")
-        self.page.wait_for_timeout(500)
 
     # ---------- main sync ----------
     def sync_to_ideal(self, ideal, apply: bool = True):
