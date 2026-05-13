@@ -31,6 +31,7 @@ CONSTRUCTOR_ABBR_TO_FULL: dict[str, str] = {
     "FER": "Ferrari",
     "MER": "Mercedes",
     "RBR": "Red Bull Racing",
+    "RED": "Red Bull Racing",
     "ALP": "Alpine",
     "WIL": "Williams",
     "AST": "Aston Martin",

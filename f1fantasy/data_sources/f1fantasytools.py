@@ -3,9 +3,12 @@ from __future__ import annotations
 import itertools
 import json
 import re
+import ssl
 import urllib.request
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
+
+import certifi
 
 URL = "https://f1fantasytools.com/team-calculator"
 
@@ -17,7 +20,8 @@ def fetch(url: str) -> str:
             "User-Agent": "Mozilla/5.0 (X11; Linux) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
         },
     )
-    with urllib.request.urlopen(req, timeout=60) as r:
+    ctx = ssl.create_default_context(cafile=certifi.where())
+    with urllib.request.urlopen(req, timeout=60, context=ctx) as r:
         return r.read().decode("utf-8", errors="ignore")
 
 
@@ -61,7 +65,7 @@ class Pick:
     pts: float
 
 
-def compute_optimal(max_budget: float, data: dict) -> dict:
+def _build_pick_lists(data: dict) -> tuple[list[Pick], list[Pick], dict]:
     drivers_raw = data.get("drivers") or []
     constructors_raw = data.get("constructors") or []
     analyst_sims = data.get("analystSims") or []
@@ -94,8 +98,24 @@ def compute_optimal(max_budget: float, data: dict) -> dict:
 
     if not drivers or not constructors:
         raise RuntimeError("Could not build drivers/constructors pick lists")
+    return drivers, constructors, sim
 
-    best: Tuple[float, float, Tuple[str, str], Tuple[str, ...], str] | None = None
+
+def compute_optimal(max_budget: float, data: dict, *, scoring_mode: str = "standard") -> dict:
+    """Compute an optimal F1 Fantasy team.
+
+    scoring_mode:
+      - standard: normal team with one 2x DRS boost.
+      - x3: Extra DRS chip, where one driver gets 3x and a different driver
+        still gets the normal 2x boost. The returned "boost" is the normal 2x
+        driver and "x3_boost" is the 3x driver.
+    """
+
+    if scoring_mode not in {"standard", "x3"}:
+        raise ValueError("scoring_mode must be 'standard' or 'x3'")
+
+    drivers, constructors, sim = _build_pick_lists(data)
+    best: Tuple[float, float, Tuple[str, str], Tuple[str, ...], str, str | None] | None = None
 
     for c1, c2 in itertools.combinations(constructors, 2):
         c_cost = c1.price + c2.price
@@ -110,30 +130,53 @@ def compute_optimal(max_budget: float, data: dict) -> dict:
                 continue
 
             base_points = c_points + sum(d.pts for d in ds)
-            for boost in ds:
-                points = base_points + boost.pts
-                if best is None or points > best[0] + 1e-9 or (
-                    abs(points - best[0]) < 1e-9 and total_cost < best[1] - 1e-9
-                ):
-                    best = (
-                        points,
-                        total_cost,
-                        tuple(sorted([c1.code, c2.code])),
-                        tuple(sorted([d.code for d in ds])),
-                        boost.code,
-                    )
+            if scoring_mode == "standard":
+                for boost in ds:
+                    points = base_points + boost.pts
+                    x3_boost = None
+                    if best is None or points > best[0] + 1e-9 or (
+                        abs(points - best[0]) < 1e-9 and total_cost < best[1] - 1e-9
+                    ):
+                        best = (
+                            points,
+                            total_cost,
+                            tuple(sorted([c1.code, c2.code])),
+                            tuple(sorted([d.code for d in ds])),
+                            boost.code,
+                            x3_boost,
+                        )
+            else:
+                for x3_driver in ds:
+                    for boost in ds:
+                        if boost.code == x3_driver.code:
+                            continue
+                        # Base includes each driver's 1x points. x3 adds two extra
+                        # copies for the 3x driver; normal boost adds one extra copy.
+                        points = base_points + (2 * x3_driver.pts) + boost.pts
+                        if best is None or points > best[0] + 1e-9 or (
+                            abs(points - best[0]) < 1e-9 and total_cost < best[1] - 1e-9
+                        ):
+                            best = (
+                                points,
+                                total_cost,
+                                tuple(sorted([c1.code, c2.code])),
+                                tuple(sorted([d.code for d in ds])),
+                                boost.code,
+                                x3_driver.code,
+                            )
 
     if best is None:
         raise RuntimeError("No feasible team found under budget")
 
-    points, cost, cons, drvs, boost = best
-    return {
+    points, cost, cons, drvs, boost, x3_boost = best
+    out = {
         "max_budget": round(max_budget, 3),
         "constructors": list(cons),
         "drivers": list(drvs),
         "boost": boost,
         "total_cost": round(cost, 3),
         "expected_points": round(points, 3),
+        "scoring_mode": scoring_mode,
         "sim": {
             "id": sim.get("id"),
             "name": sim.get("name"),
@@ -141,21 +184,18 @@ def compute_optimal(max_budget: float, data: dict) -> dict:
             "season": sim.get("season"),
         },
     }
+    if x3_boost is not None:
+        out["x3_boost"] = x3_boost
+    return out
 
 
-def load_optimal_and_prices(max_budget: float, url: str | None = None) -> tuple[dict, dict]:
-    """Return (optimal, price_maps).
-
-    price_maps:
-      {
-        "drivers": {"LEC": 22.8, ...},
-        "constructors": {"MCL": 28.9, ...}
-      }
-    """
+def load_embedded_data(url: str | None = None) -> dict:
     html = fetch(url or URL)
     payload = extract_next_payload(html)
-    data = extract_json_object_from_payload(payload)
+    return extract_json_object_from_payload(payload)
 
+
+def price_maps_from_data(data: dict) -> dict:
     drv_prices: dict[str, float] = {}
     for d in (data.get("drivers") or []):
         if d.get("type") == "driver" and d.get("abbreviation") and d.get("price") is not None:
@@ -165,6 +205,18 @@ def load_optimal_and_prices(max_budget: float, url: str | None = None) -> tuple[
     for c in (data.get("constructors") or []):
         if c.get("type") == "constructor" and c.get("abbreviation") and c.get("price") is not None:
             con_prices[str(c["abbreviation"])] = float(c["price"])
+    return {"drivers": drv_prices, "constructors": con_prices}
 
-    optimal = compute_optimal(max_budget, data)
-    return optimal, {"drivers": drv_prices, "constructors": con_prices}
+
+def load_optimal_and_prices(max_budget: float, url: str | None = None, *, scoring_mode: str = "standard") -> tuple[dict, dict]:
+    """Return (optimal, price_maps).
+
+    price_maps:
+      {
+        "drivers": {"LEC": 22.8, ...},
+        "constructors": {"MCL": 28.9, ...}
+      }
+    """
+    data = load_embedded_data(url)
+    optimal = compute_optimal(max_budget, data, scoring_mode=scoring_mode)
+    return optimal, price_maps_from_data(data)

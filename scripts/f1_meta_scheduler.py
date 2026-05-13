@@ -20,81 +20,29 @@ import argparse
 import json
 import subprocess
 import sys
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 F1_CALENDAR_API = "https://f1calendar.com/api/calendar"
 OPTIMIZER_SCRIPT = Path(__file__).parent / "f1_fantasy.py"
 REPO_DIR = Path(__file__).parent.parent
+sys.path.insert(0, str(REPO_DIR))
+
+from f1fantasy.logic.deadline import (  # noqa: E402
+    fetch_calendar,
+    find_next_race,
+    get_deadline_and_pre_session,
+    is_sprint_weekend,
+    parse_calendar_datetime,
+)
 
 # Slack time before deadline (minutes) - how early we want to finish applying
 SLACK_BEFORE_DEADLINE_MIN = 30
+MODEL_UPDATE_DELAY_MIN = 45
+SESSION_DURATION = timedelta(hours=1)
 
 # How many days after the race to schedule the next meta-scheduler run
 POST_RACE_FOLLOWUP_DAYS = 3
-
-
-def fetch_calendar() -> list[dict]:
-    """Fetch the F1 calendar from f1calendar.com."""
-    req = urllib.request.Request(
-        F1_CALENDAR_API,
-        headers={"User-Agent": "Mozilla/5.0"},
-    )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        data = json.loads(r.read().decode())
-    return data["races"]
-
-
-def find_next_race(now: datetime, races: list[dict]) -> dict | None:
-    """Find the next upcoming race (first race whose Grand Prix is after `now`)."""
-    for race in races:
-        gp_time = datetime.fromisoformat(race["sessions"]["Grand Prix"].replace("Z", "+00:00"))
-        if gp_time > now:
-            return race
-    return None
-
-
-def is_sprint_weekend(race: dict) -> bool:
-    """Check if this is a sprint weekend."""
-    return "Sprint" in race["sessions"] or "Sprint Qualifying" in race["sessions"]
-
-
-def get_deadline_and_pre_session(race: dict) -> tuple[datetime, str, datetime]:
-    """
-    Determine the Fantasy team lock deadline and the session just before it.
-
-    F1 Fantasy deadline = before the FIRST session that affects the race grid:
-    - Sprint weekends: deadline before Sprint Race (Saturday)
-    - Normal weekends: deadline before Qualifying (Saturday)
-
-    The "pre-session" is the last session before the deadline, which is where
-    we want the model to have updated data from.
-
-    Returns: (deadline_utc, pre_session_name, pre_session_end_utc)
-    """
-    sessions = race["sessions"]
-
-    if is_sprint_weekend(race):
-        # Sprint weekend: deadline before Sprint Race
-        # Pre-session is Sprint Qualifying (the session that sets the Sprint grid)
-        sprint_start = datetime.fromisoformat(sessions["Sprint"].replace("Z", "+00:00"))
-        sq_start = datetime.fromisoformat(sessions["Sprint Qualifying"].replace("Z", "+00:00"))
-        # Sprint Qualifying typically ~1 hour
-        sq_end = sq_start + timedelta(hours=1)
-        # Deadline is ~30 min before Sprint Race
-        deadline = sprint_start - timedelta(minutes=30)
-        return deadline, "Sprint Qualifying", sq_end
-    else:
-        # Normal weekend: deadline before Qualifying
-        # Pre-session is FP3
-        qualifying_start = datetime.fromisoformat(sessions["Qualifying"].replace("Z", "+00:00"))
-        fp3_start = datetime.fromisoformat(sessions["Free Practice 3"].replace("Z", "+00:00"))
-        # FP sessions are typically 1 hour
-        fp3_end = fp3_start + timedelta(hours=1)
-        # Deadline is ~30 min before Qualifying
-        deadline = qualifying_start - timedelta(minutes=30)
-        return deadline, "FP3", fp3_end
 
 
 def compute_optimal_time(pre_session_end: datetime, deadline: datetime) -> datetime:
@@ -113,6 +61,55 @@ def compute_optimal_time(pre_session_end: datetime, deadline: datetime) -> datet
 def format_iso(dt: datetime) -> str:
     """Format datetime as ISO string for OpenClaw cron."""
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def compute_optimizer_runs(race: dict, *, now: datetime) -> list[tuple[str, datetime]]:
+    """Return all useful pre-lock optimizer run times for a race week.
+
+    Transfers are reversible until lock, so we prefer several guarded apply
+    opportunities: a seed run before track action, then reruns after each
+    information-producing session that occurs before the fantasy deadline.
+    """
+
+    deadline, pre_session_name, pre_session_end = get_deadline_and_pre_session(race)
+    latest_start = deadline - timedelta(minutes=SLACK_BEFORE_DEADLINE_MIN)
+    sessions = race.get("sessions", {})
+    names = ["Free Practice 1"]
+    if is_sprint_weekend(race):
+        names.extend(["Sprint Qualifying", "Sprint Shootout"])
+    else:
+        names.extend(["Free Practice 2", "Free Practice 3"])
+
+    runs: list[tuple[str, datetime]] = []
+    fp1_raw = sessions.get("Free Practice 1")
+    if fp1_raw:
+        fp1 = parse_calendar_datetime(fp1_raw)
+        seed = min(fp1 - timedelta(hours=2), latest_start)
+        if seed > now:
+            runs.append(("seed-before-fp1", seed))
+
+    for name in names:
+        raw = sessions.get(name)
+        if not raw:
+            continue
+        session_end = parse_calendar_datetime(raw) + SESSION_DURATION
+        run_at = session_end + timedelta(minutes=MODEL_UPDATE_DELAY_MIN)
+        if name == pre_session_name:
+            run_at = compute_optimal_time(session_end, deadline)
+        if now < run_at < latest_start:
+            runs.append((f"after-{safe_job_token(name)}", run_at))
+
+    # Ensure a final guardrail run exists even if the calendar/session math above
+    # misses a session name variant.
+    final_run = min(compute_optimal_time(pre_session_end, deadline), latest_start)
+    if final_run > now and all(abs((final_run - t).total_seconds()) > 300 for _, t in runs):
+        runs.append(("final-pre-lock", final_run))
+
+    return sorted(runs, key=lambda item: item[1])
+
+
+def safe_job_token(name: str) -> str:
+    return name.lower().replace(" ", "-")
 
 
 def schedule_cron_job(name: str, at_iso: str, message: str, delete_after: bool = True) -> str:
@@ -166,7 +163,7 @@ def main() -> int:
     # Print sessions
     print("Sessions:")
     for name, time_str in next_race["sessions"].items():
-        t = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+        t = parse_calendar_datetime(time_str)
         print(f"  {name}: {t.strftime('%a %b %d, %H:%M UTC')}")
     print()
 
@@ -177,17 +174,18 @@ def main() -> int:
     print(f"Fantasy deadline: {deadline.strftime('%a %b %d, %H:%M UTC')}")
     print()
 
-    # Compute optimal time
-    gap = deadline - pre_session_end
-    optimal = compute_optimal_time(pre_session_end, deadline)
-    print(f"Gap between {pre_session_name} end and deadline: {gap.total_seconds() / 3600:.1f} hours")
-    print(f"Optimal optimizer run time: {optimal.strftime('%a %b %d, %H:%M UTC')}")
-    print(f"  ({(optimal - pre_session_end).total_seconds() / 60:.0f} min after {pre_session_name} end)")
-    print(f"  ({(deadline - optimal).total_seconds() / 60:.0f} min before deadline)")
+    # Compute optimizer run times
+    optimizer_runs = compute_optimizer_runs(next_race, now=now)
+    print("Optimizer run plan:")
+    if optimizer_runs:
+        for label, run_at in optimizer_runs:
+            print(f"  {label}: {run_at.strftime('%a %b %d, %H:%M UTC')}")
+    else:
+        print("  No pre-lock optimizer runs remain for this race")
     print()
 
     # Compute post-race followup time
-    gp_time = datetime.fromisoformat(next_race["sessions"]["Grand Prix"].replace("Z", "+00:00"))
+    gp_time = parse_calendar_datetime(next_race["sessions"]["Grand Prix"])
     followup = gp_time + timedelta(days=args.schedule_followup_days)
     # Set followup to 14:00 UTC on that day (morning ET)
     followup = followup.replace(hour=14, minute=0, second=0)
@@ -198,32 +196,45 @@ def main() -> int:
         print("=== DRY RUN - No jobs scheduled ===")
         return 0
 
-    # Schedule the optimizer job
-    optimizer_msg = (
-        f"Run F1 Fantasy optimizer for {next_race['name']} (Round {next_race['round']}).\n\n"
-        f"Steps:\n"
-        f"1. Log into F1 Fantasy at https://account.formula1.com/#/en/login "
-        f"(email: pascal.ai.inbox@gmail.com, password: aA@pascal123)\n"
-        f"2. Go to https://fantasy.formula1.com/en/my-team/1 to see current team\n"
-        f"3. Run: cd /home/opc/repos/fantasy-formula-1 && python3.12 scripts/f1_fantasy.py run "
-        f"--team-id 1 --expected-team-name 'Pascal GP 1' --profile-dir .playwright-profile\n"
-        f"4. If Playwright fails, use the OpenClaw browser to:\n"
-        f"   a. Scrape current team from /en/my-team page\n"
-        f"   b. Run optimizer: python3.12 -c \"from f1fantasy.data_sources.f1fantasytools import load_optimal_and_prices; ...\"\n"
-        f"5. Compare current team vs optimal (accounting for -10pt penalty per extra transfer)\n"
-        f"6. If beneficial transfers exist, apply them via the F1 Fantasy site\n"
-        f"7. Send results to Enzo on WhatsApp\n\n"
-        f"IMPORTANT: Only apply transfers if net points gain is positive after penalties."
+    optimizer_msg_template = (
+        "Run F1 Fantasy optimizer for {race_name} (Round {round}) at checkpoint {checkpoint}.\n\n"
+        "Steps:\n"
+        "1. Use credentials only from .env (F1_EMAIL/F1_PASSWORD), an existing persistent "
+        "Playwright profile, or manual browser login. Do not print or paste passwords.\n"
+        "2. Run a report-only pass: cd /home/opc/repos/fantasy-formula-1 && "
+        "python3.12 scripts/f1_fantasy.py run --team-id 1 --expected-team-name 'Pascal GP 1' "
+        "--profile-dir .playwright-profile\n"
+        "3. Review state/last_run.json. The transfer policy must use baseline_transfers_required, "
+        "not the current-site UI diff, because midweek provisional swaps are reversible until lock.\n"
+        "4. Review chip_strategy.notes plus chip_strategy.chip_math.limitless and chip_strategy.chip_math.x3_boost. "
+        "If the ideal team is 4+ baseline swaps away, explicitly say 'consider Wildcard'. On Sprint weekends, "
+        "compare Auto Pilot, No Negative, Limitless, and x3 subjectively; check weather because rain increases No Negative value. "
+        "For x3, remember the optimizer uses a separate 3x driver and normal 2x driver.\n"
+        "5. If policy_decision.apply is true and projections are fresh for this race, apply immediately unless chip/transfer planning "
+        "argues for preserving 3 free transfers into an upcoming Sprint: "
+        "python3.12 scripts/f1_fantasy.py run --team-id 1 --expected-team-name 'Pascal GP 1' "
+        "--profile-dir .playwright-profile --apply\n"
+        "6. Send the report/results to Enzo on WhatsApp.\n\n"
+        "IMPORTANT: Applying early is intentional; later checkpoints can revise the team while staying "
+        "within the free-transfer limit relative to the saved race-week baseline."
     )
 
-    job_id = schedule_cron_job(
-        name=f"F1 Fantasy optimizer - {next_race['name']} (R{next_race['round']})",
-        at_iso=format_iso(optimal),
-        message=optimizer_msg,
-        delete_after=True,
-    )
-    print(f"✅ Optimizer job scheduled: {job_id}")
-    print(f"   Runs at: {optimal.strftime('%a %b %d, %H:%M UTC')}")
+    scheduled_optimizer_ids = []
+    for label, run_at in optimizer_runs:
+        optimizer_msg = optimizer_msg_template.format(
+            race_name=next_race["name"],
+            round=next_race["round"],
+            checkpoint=label,
+        )
+        job_id = schedule_cron_job(
+            name=f"F1 Fantasy {label} - {next_race['name']} (R{next_race['round']})",
+            at_iso=format_iso(run_at),
+            message=optimizer_msg,
+            delete_after=True,
+        )
+        scheduled_optimizer_ids.append(job_id)
+        print(f"✅ Optimizer job scheduled: {job_id}")
+        print(f"   {label}: {run_at.strftime('%a %b %d, %H:%M UTC')}")
 
     # Schedule the follow-up meta-scheduler job
     followup_msg = (

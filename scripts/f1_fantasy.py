@@ -23,11 +23,86 @@ sys.path.insert(0, str(BASE_DIR))
 
 from f1fantasy import config
 from f1fantasy.data_sources.f1fantasytools import load_optimal_and_prices
-from f1fantasy.data_sources.official_site import scrape_budget_snapshot
+from f1fantasy.data_sources.official_site import scrape_budget_snapshot, scrape_transfer_status
 from f1fantasy.io.artifacts import ensure_state_dirs, write_json, read_json
+from f1fantasy.logic.deadline import current_deadline_decision
+from f1fantasy.logic.lock import FileLock, LockAcquisitionError
 from f1fantasy.logic.orchestrator import run_end_to_end, sync_team_to_ideal
+from f1fantasy.logic.transfer_policy import compute_baseline_transfer_policy, current_race_context, get_or_create_transfer_baseline
 from f1fantasy.mappings import map_optimal_to_ideal
 from f1fantasy.models import TeamSpec
+
+
+APPLY_LOCK_PATH = config.STATE_DIR / "apply.lock"
+
+
+def _check_deadline_or_exit(*, ignore_deadline: bool) -> None:
+    if ignore_deadline:
+        print("WARNING: bypassing fantasy deadline guard due to --ignore-deadline", file=sys.stderr)
+        return
+    try:
+        decision, context = current_deadline_decision()
+    except Exception as exc:
+        raise SystemExit(f"Deadline guard could not verify current lock status; blocking apply by default: {exc}") from exc
+    if not decision.allowed:
+        race = context.get("race_name") or "upcoming race"
+        raise SystemExit(f"Apply blocked for {race}: {decision.reason} (use --ignore-deadline only for manual emergency override)")
+
+
+def _check_free_transfers_or_exit(*, args: argparse.Namespace, ideal: dict) -> dict:
+    """Read-only preflight guard for sync apply.
+
+    Uses force=True so this decision is based on current site state instead of
+    a cached local state file. The only override is --allow-paid-transfers.
+    """
+
+    preflight = sync_team_to_ideal(
+        team_id=args.team_id,
+        ideal=ideal,
+        expected_team_name=args.expected_team_name,
+        profile_dir=args.profile_dir,
+        headful=args.headful,
+        apply=False,
+        force=True,
+    )
+    transfer_status = scrape_transfer_status(team_id=args.team_id, profile_dir=args.profile_dir, headful=args.headful)
+    diff = preflight.get("diff") or {}
+    free_transfers = int(transfer_status.free_transfers)
+    site_before = preflight.get("site_before") or {}
+    try:
+        if not site_before:
+            raise RuntimeError("current site state was not available during preflight")
+        race_context = current_race_context()
+        baseline = get_or_create_transfer_baseline(
+            team_id=args.team_id,
+            race_context=race_context,
+            current_state=site_before,
+        )
+        transfer_policy = compute_baseline_transfer_policy(
+            baseline=baseline,
+            current_state=site_before,
+            ideal=ideal,
+            free_transfers=free_transfers,
+        )
+        transfers_required = int(transfer_policy["baseline_transfers_required"])
+    except Exception as exc:
+        if not args.allow_paid_transfers:
+            raise SystemExit(f"Sync apply blocked: could not verify race-week transfer baseline: {exc}") from exc
+        transfer_policy = {"baseline_error": str(exc)}
+        transfers_required = int(diff.get("transfers_required") or 0)
+    if transfers_required > free_transfers and not args.allow_paid_transfers:
+        raise SystemExit(
+            f"Sync apply blocked: ideal team is {transfers_required} transfers from the race-week baseline but only "
+            f"{free_transfers} free transfers are available (use --allow-paid-transfers to override)"
+        )
+    return {
+        "preflight": preflight,
+        "transfer_status": transfer_status.to_dict(),
+        "transfers_required": transfers_required,
+        "free_transfers": free_transfers,
+        "paid_transfer_override": bool(args.allow_paid_transfers),
+        "transfer_policy": transfer_policy,
+    }
 
 
 def cmd_budget(args: argparse.Namespace) -> int:
@@ -51,7 +126,7 @@ def cmd_optimal(args: argparse.Namespace) -> int:
         budget_snapshot = scrape_budget_snapshot(team_id=args.team_id, profile_dir=args.profile_dir, headful=args.headful)
         budget = float(budget_snapshot.cap_m)
 
-    optimal, price_maps = load_optimal_and_prices(float(budget), url=args.url)
+    optimal, price_maps = load_optimal_and_prices(float(budget), url=args.url, scoring_mode=args.scoring_mode)
     ideal = map_optimal_to_ideal(optimal)
 
     if args.boost_driver_override:
@@ -87,15 +162,33 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     TeamSpec.from_dict(ideal)  # validate
 
-    res = sync_team_to_ideal(
-        team_id=args.team_id,
-        ideal=ideal,
-        expected_team_name=args.expected_team_name,
-        profile_dir=args.profile_dir,
-        headful=args.headful,
-        apply=(not args.no_apply),
-        force=args.force,
-    )
+    do_apply = not args.no_apply
+    if do_apply:
+        try:
+            with FileLock(APPLY_LOCK_PATH):
+                _check_deadline_or_exit(ignore_deadline=args.ignore_deadline)
+                _check_free_transfers_or_exit(args=args, ideal=ideal)
+                res = sync_team_to_ideal(
+                    team_id=args.team_id,
+                    ideal=ideal,
+                    expected_team_name=args.expected_team_name,
+                    profile_dir=args.profile_dir,
+                    headful=args.headful,
+                    apply=True,
+                    force=args.force,
+                )
+        except LockAcquisitionError as exc:
+            raise SystemExit(str(exc)) from exc
+    else:
+        res = sync_team_to_ideal(
+            team_id=args.team_id,
+            ideal=ideal,
+            expected_team_name=args.expected_team_name,
+            profile_dir=args.profile_dir,
+            headful=args.headful,
+            apply=False,
+            force=args.force,
+        )
 
     print(json.dumps(res, indent=2, sort_keys=True))
     return 0
@@ -104,18 +197,29 @@ def cmd_sync(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     ensure_state_dirs()
 
-    bundle = run_end_to_end(
-        team_id=args.team_id,
-        budget=args.budget,
-        expected_team_name=args.expected_team_name,
-        ideal_out=Path(args.ideal_out),
-        profile_dir=args.profile_dir,
-        headful=args.headful,
-        apply=args.apply,
-        force=args.force,
-        url=args.url,
-        boost_driver_override=args.boost_driver_override,
-    )
+    def _run() -> dict:
+        return run_end_to_end(
+            team_id=args.team_id,
+            budget=args.budget,
+            expected_team_name=args.expected_team_name,
+            ideal_out=Path(args.ideal_out),
+            profile_dir=args.profile_dir,
+            headful=args.headful,
+            apply=args.apply,
+            force=args.force,
+            url=args.url,
+            boost_driver_override=args.boost_driver_override,
+            ignore_deadline=args.ignore_deadline,
+        )
+
+    if args.apply:
+        try:
+            with FileLock(APPLY_LOCK_PATH):
+                bundle = _run()
+        except LockAcquisitionError as exc:
+            raise SystemExit(str(exc)) from exc
+    else:
+        bundle = _run()
 
     if args.out:
         Path(args.out).write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -142,6 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_opt.add_argument("--profile-dir", default=config.DEFAULT_PROFILE_DIR)
     p_opt.add_argument("--headful", action="store_true")
     p_opt.add_argument("--url", default=None, help="Override f1fantasytools team-calculator URL")
+    p_opt.add_argument("--scoring-mode", choices=["standard", "x3"], default="standard", help="Optimizer scoring mode: normal 2x boost or x3 chip with separate 2x boost")
     p_opt.add_argument("--ideal-out", default=str(config.BASE_DIR / "ideal_team.json"))
     p_opt.add_argument("--boost-driver-override", default=None)
     # Convenience flag (matches older workflow). Currently state JSONs are written by default.
@@ -156,6 +261,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--headful", action="store_true")
     p_sync.add_argument("--no-apply", action="store_true")
     p_sync.add_argument("--force", action="store_true")
+    p_sync.add_argument("--ignore-deadline", action="store_true", help="Emergency override: allow apply even if deadline guard blocks")
+    p_sync.add_argument("--allow-paid-transfers", action="store_true", help="Allow sync apply when required transfers exceed free transfers")
     p_sync.set_defaults(func=cmd_sync)
 
     p_run = sub.add_parser("run", help="End-to-end run (budget->optimal->sync->verify)")
@@ -167,6 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--headful", action="store_true")
     p_run.add_argument("--apply", action="store_true", help="Actually apply changes on the official site")
     p_run.add_argument("--force", action="store_true")
+    p_run.add_argument("--ignore-deadline", action="store_true", help="Emergency override: allow apply even if deadline guard blocks")
     p_run.add_argument("--url", default=None)
     p_run.add_argument("--boost-driver-override", default=None)
     p_run.add_argument("--out", default=None, help="Optional output path for last_run bundle")

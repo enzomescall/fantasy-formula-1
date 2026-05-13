@@ -1,14 +1,14 @@
 {
-  "boost_driver": "George Russell",
+  "boost_driver": "Charles Leclerc",
   "constructors": [
     "Ferrari",
-    "Racing Bulls"
+    "Mercedes"
   ],
   "drivers": [
     "Oliver Bearman",
-    "Liam Lawson",
+    "Gabriel Bortoleto",
+    "Nico Hulkenberg",
     "Charles Leclerc",
-    "Arvid Lindblad",
-    "George Russell"
+    "Esteban Ocon"
   ]
 }

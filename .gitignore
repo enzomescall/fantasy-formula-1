@@ -1,5 +1,7 @@
 # Secrets / sessions
-.playwright-profile/
+.env
+.brv/
+.playwright-profile*/
 
 # Local state & artifacts
 state/
