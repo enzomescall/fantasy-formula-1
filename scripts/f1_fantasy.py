@@ -269,7 +269,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--team-id", type=int, default=1)
     p_run.add_argument("--budget", default="auto")
     p_run.add_argument("--expected-team-name", default=config.DEFAULT_EXPECTED_TEAM_NAME)
-    p_run.add_argument("--ideal-out", default=str(config.BASE_DIR / "ideal_team.json"))
+    p_run.add_argument("--ideal-out", default=str(config.STATE_DIR / "ideal_team.json"))
     p_run.add_argument("--profile-dir", default=config.DEFAULT_PROFILE_DIR)
     p_run.add_argument("--headful", action="store_true")
     p_run.add_argument("--apply", action="store_true", help="Actually apply changes on the official site")

@@ -201,20 +201,24 @@ def main() -> int:
         "Steps:\n"
         "1. Use credentials only from .env (F1_EMAIL/F1_PASSWORD), an existing persistent "
         "Playwright profile, or manual browser login. Do not print or paste passwords.\n"
-        "2. Run a report-only pass: cd /home/opc/repos/fantasy-formula-1 && "
+        "2. Before reading any cached state, verify f1fantasytools' embedded model is fresh for this race: "
+        "cd /home/opc/repos/fantasy-formula-1 && python3.12 scripts/f1_fantasy.py optimal --budget 110 --write-state. "
+        "Confirm the printed optimal.sim.name/raceweek matches {race_name} / Round {round}; do not use stale state/last_run.json output.\n"
+        "3. Run a fresh report-only pass to a unique artifact path: cd /home/opc/repos/fantasy-formula-1 && "
         "python3.12 scripts/f1_fantasy.py run --team-id 1 --expected-team-name 'Pascal GP 1' "
-        "--profile-dir .playwright-profile\n"
-        "3. Review state/last_run.json. The transfer policy must use baseline_transfers_required, "
-        "not the current-site UI diff, because midweek provisional swaps are reversible until lock.\n"
-        "4. Review chip_strategy.notes plus chip_strategy.chip_math.limitless and chip_strategy.chip_math.x3_boost. "
+        "--profile-dir .playwright-profile --out state/cron_{safe_race_name}_round{round}_last_run.json\n"
+        "4. Review state/cron_{safe_race_name}_round{round}_last_run.json and confirm inputs.sim.name/raceweek still matches {race_name} / Round {round}. "
+        "The transfer policy must use baseline_transfers_required, not the current-site UI diff, "
+        "because midweek provisional swaps are reversible until lock.\n"
+        "5. Review chip_strategy.notes plus chip_strategy.chip_math.limitless and chip_strategy.chip_math.x3_boost. "
         "If the ideal team is 4+ baseline swaps away, explicitly say 'consider Wildcard'. On Sprint weekends, "
         "compare Auto Pilot, No Negative, Limitless, and x3 subjectively; check weather because rain increases No Negative value. "
         "For x3, remember the optimizer uses a separate 3x driver and normal 2x driver.\n"
-        "5. If policy_decision.apply is true and projections are fresh for this race, apply immediately unless chip/transfer planning "
+        "6. If policy_decision.apply is true and projections are fresh for this race, apply immediately unless chip/transfer planning "
         "argues for preserving 3 free transfers into an upcoming Sprint: "
         "python3.12 scripts/f1_fantasy.py run --team-id 1 --expected-team-name 'Pascal GP 1' "
         "--profile-dir .playwright-profile --apply\n"
-        "6. Send the report/results to Enzo on WhatsApp.\n\n"
+        "7. Send the report/results to Enzo on WhatsApp.\n\n"
         "IMPORTANT: Applying early is intentional; later checkpoints can revise the team while staying "
         "within the free-transfer limit relative to the saved race-week baseline."
     )
@@ -225,6 +229,7 @@ def main() -> int:
             race_name=next_race["name"],
             round=next_race["round"],
             checkpoint=label,
+            safe_race_name=safe_job_token(next_race["name"]),
         )
         job_id = schedule_cron_job(
             name=f"F1 Fantasy {label} - {next_race['name']} (R{next_race['round']})",

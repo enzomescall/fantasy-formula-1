@@ -5,7 +5,7 @@ Automation tools for the official F1 Fantasy site using Playwright plus f1fantas
 ## What this repo does
 - Scrapes budget/current-team state from fantasy.formula1.com
 - Computes an optimal team from f1fantasytools.com for the available budget
-- Maps that result to `ideal_team.json`
+- Maps that result to a generated ideal spec under ignored `state/` artifacts during end-to-end runs
 - Reports the diff, transfer count, transfer policy, deadline policy, and chip-strategy watch notes
 - Computes chip math for Limitless (`999.0m` budget) and x3 Boost (CSP with separate 3x and 2x drivers)
 - Charges transfers against the saved race-week baseline (the previous race's locked team), not against provisional midweek edits
@@ -36,7 +36,7 @@ Do not print, commit, or paste passwords into scripts, docs, scheduler messages,
 Use `scripts/f1_fantasy.py` for all current workflows.
 
 ### Report-only/default end-to-end run
-`run` without `--apply` is report-only. It computes the recommendation, scrapes current site state, evaluates transfer/deadline policy, writes `state/last_run.json`, and does not mutate the official site.
+Report-only/default end-to-end `run` writes the generated ideal spec to `state/ideal_team.json` by default, so routine tests and cron runs do not dirty the tracked sample `ideal_team.json`. It computes the recommendation, scrapes current site state, evaluates transfer/deadline policy, writes `state/last_run.json`, and does not mutate the official site.
 
 ```bash
 python3.12 scripts/f1_fantasy.py run \
