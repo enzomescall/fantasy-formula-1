@@ -111,6 +111,18 @@ Compute optimal team for a known budget:
 python3.12 scripts/f1_fantasy.py optimal --budget 100.0 --ideal-out ideal_team.json
 ```
 
+Compute optimal team from the local backup scoring model when f1fantasytools is stale/unavailable:
+
+```bash
+python3.12 scripts/f1_fantasy.py optimal \
+  --source backup \
+  --projection examples/backup_projection.example.json \
+  --budget 110.0 \
+  --ideal-out state/ideal_team.json
+```
+
+The backup projection JSON is intentionally simple: projected quali/sprint/race positions, overtakes, fastest-lap/DOTD probabilities, prices, and constructor pit-stop assumptions. The code applies the official F1 Fantasy scoring table locally, then reuses the existing optimizer.
+
 Compute optimal team using scraped budget:
 
 ```bash

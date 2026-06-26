@@ -22,6 +22,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_DIR))
 
 from f1fantasy import config
+from f1fantasy.data_sources.backup_model import load_optimal_and_prices_from_projection
 from f1fantasy.data_sources.f1fantasytools import load_optimal_and_prices
 from f1fantasy.data_sources.official_site import scrape_budget_snapshot, scrape_transfer_status
 from f1fantasy.io.artifacts import ensure_state_dirs, write_json, read_json
@@ -126,7 +127,14 @@ def cmd_optimal(args: argparse.Namespace) -> int:
         budget_snapshot = scrape_budget_snapshot(team_id=args.team_id, profile_dir=args.profile_dir, headful=args.headful)
         budget = float(budget_snapshot.cap_m)
 
-    optimal, price_maps = load_optimal_and_prices(float(budget), url=args.url, scoring_mode=args.scoring_mode)
+    if args.source == "f1fantasytools":
+        optimal, price_maps = load_optimal_and_prices(float(budget), url=args.url, scoring_mode=args.scoring_mode)
+    else:
+        if not args.projection:
+            raise SystemExit("--projection is required when --source backup")
+        optimal, price_maps = load_optimal_and_prices_from_projection(
+            float(budget), args.projection, scoring_mode=args.scoring_mode
+        )
     ideal = map_optimal_to_ideal(optimal)
 
     if args.boost_driver_override:
@@ -240,11 +248,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_budget.add_argument("--write-state", action="store_true", help="Also write state/last_budget.json")
     p_budget.set_defaults(func=cmd_budget)
 
-    p_opt = sub.add_parser("optimal", help="Compute optimal team using f1fantasytools")
+    p_opt = sub.add_parser("optimal", help="Compute optimal team from f1fantasytools or a local backup projection")
     p_opt.add_argument("--team-id", type=int, default=1, help="Used only when --budget auto")
     p_opt.add_argument("--budget", default="auto", help='Budget cap in millions, or "auto" to scrape')
     p_opt.add_argument("--profile-dir", default=config.DEFAULT_PROFILE_DIR)
     p_opt.add_argument("--headful", action="store_true")
+    p_opt.add_argument("--source", choices=["f1fantasytools", "backup"], default="f1fantasytools")
+    p_opt.add_argument("--projection", default=None, help="Local backup-model projection JSON; required with --source backup")
     p_opt.add_argument("--url", default=None, help="Override f1fantasytools team-calculator URL")
     p_opt.add_argument("--scoring-mode", choices=["standard", "x3"], default="standard", help="Optimizer scoring mode: normal 2x boost or x3 chip with separate 2x boost")
     p_opt.add_argument("--ideal-out", default=str(config.BASE_DIR / "ideal_team.json"))
