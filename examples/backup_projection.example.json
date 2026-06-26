@@ -1,0 +1,128 @@
+{
+  "id": "example-local-miami-2026",
+  "name": "Example local backup projection",
+  "season": 2026,
+  "raceweek": 6,
+  "drivers": [
+    {
+      "code": "VER",
+      "team": "RBR",
+      "price": 29.0,
+      "quali_pos": 2.0,
+      "race_start": 2.0,
+      "race_finish": 2.0,
+      "race_overtakes": 1.5,
+      "race_fastest_lap_prob": 0.25,
+      "dotd_prob": 0.15
+    },
+    {
+      "code": "NOR",
+      "team": "MCL",
+      "price": 27.0,
+      "quali_pos": 1.5,
+      "race_start": 1.5,
+      "race_finish": 1.8,
+      "race_overtakes": 1.2,
+      "race_fastest_lap_prob": 0.3,
+      "dotd_prob": 0.2
+    },
+    {
+      "code": "PIA",
+      "team": "MCL",
+      "price": 25.0,
+      "quali_pos": 3.0,
+      "race_start": 3.0,
+      "race_finish": 3.2,
+      "race_overtakes": 1.0,
+      "race_fastest_lap_prob": 0.18,
+      "dotd_prob": 0.1
+    },
+    {
+      "code": "LEC",
+      "team": "FER",
+      "price": 22.0,
+      "quali_pos": 4.0,
+      "race_start": 4.0,
+      "race_finish": 4.5,
+      "race_overtakes": 1.4,
+      "race_fastest_lap_prob": 0.12,
+      "dotd_prob": 0.1
+    },
+    {
+      "code": "HAM",
+      "team": "FER",
+      "price": 20.0,
+      "quali_pos": 6.0,
+      "race_start": 6.0,
+      "race_finish": 5.8,
+      "race_overtakes": 2.0,
+      "race_fastest_lap_prob": 0.08,
+      "dotd_prob": 0.12
+    },
+    {
+      "code": "RUS",
+      "team": "MER",
+      "price": 18.0,
+      "quali_pos": 5.0,
+      "race_start": 5.0,
+      "race_finish": 5.2,
+      "race_overtakes": 1.4,
+      "race_fastest_lap_prob": 0.1,
+      "dotd_prob": 0.08
+    },
+    {
+      "code": "ANT",
+      "team": "MER",
+      "price": 13.0,
+      "quali_pos": 8.0,
+      "race_start": 8.0,
+      "race_finish": 7.0,
+      "race_overtakes": 2.4,
+      "race_fastest_lap_prob": 0.05,
+      "dotd_prob": 0.08
+    },
+    {
+      "code": "ALO",
+      "team": "AST",
+      "price": 10.0,
+      "quali_pos": 10.0,
+      "race_start": 10.0,
+      "race_finish": 9.0,
+      "race_overtakes": 2.0,
+      "race_fastest_lap_prob": 0.02,
+      "dotd_prob": 0.05
+    }
+  ],
+  "constructors": [
+    {
+      "code": "MCL",
+      "price": 29.0,
+      "pit_stop_points": 8.0,
+      "fastest_pit_stop_prob": 0.3
+    },
+    {
+      "code": "RBR",
+      "price": 25.0,
+      "pit_stop_points": 6.0,
+      "fastest_pit_stop_prob": 0.2
+    },
+    {
+      "code": "FER",
+      "price": 23.0,
+      "pit_stop_points": 5.0,
+      "fastest_pit_stop_prob": 0.18
+    },
+    {
+      "code": "MER",
+      "price": 18.0,
+      "pit_stop_points": 5.0,
+      "fastest_pit_stop_prob": 0.15
+    },
+    {
+      "code": "AST",
+      "price": 8.0,
+      "pit_stop_points": 2.0,
+      "fastest_pit_stop_prob": 0.03
+    }
+  ]
+}
